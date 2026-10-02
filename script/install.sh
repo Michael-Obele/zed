@@ -1,14 +1,18 @@
 #!/usr/bin/env sh
 set -eu
 
-# Downloads a tarball from https://zed.dev/releases and unpacks it
-# into ~/.local/. If you'd prefer to do this manually, instructions are at
-# https://zed.dev/docs/linux.
+# Downloads Zed and unpacks it into ~/.local/. If you'd prefer to do this
+# manually, instructions are at https://zed.dev/docs/linux.
+#
+# Linux: downloads this fork's unofficial test build from
+#     https://github.com/Michael-Obele/zed/releases
+#     (not affiliated with Zed Industries; see the README in that repo).
+# macOS: unchanged upstream behaviour — downloads official Zed from https://zed.dev/releases.
 
 main() {
     platform="$(uname -s)"
     arch="$(uname -m)"
-    channel="${ZED_CHANNEL:-stable}"
+    channel="${ZED_CHANNEL:-nightly}"
     ZED_VERSION="${ZED_VERSION:-latest}"
     # Use TMPDIR if available (for environments with non-standard temp directories)
     if [ -n "${TMPDIR:-}" ] && [ -d "${TMPDIR}" ]; then
@@ -82,8 +86,20 @@ linux() {
     if [ -n "${ZED_BUNDLE_PATH:-}" ]; then
         cp "$ZED_BUNDLE_PATH" "$temp/zed-linux-$arch.tar.gz"
     else
-        echo "Downloading Zed version: $ZED_VERSION"
-        curl "https://cloud.zed.dev/releases/$channel/$ZED_VERSION/download?asset=zed&arch=$arch&os=linux&source=install.sh" > "$temp/zed-linux-$arch.tar.gz"
+        if [ "$ZED_VERSION" != "latest" ]; then
+            echo "This fork publishes only the latest release; ignoring ZED_VERSION=$ZED_VERSION" >&2
+        fi
+        echo "Downloading the latest unofficial Zed build for linux-$arch"
+        asset_url="$(
+            curl "https://api.github.com/repos/Michael-Obele/zed/releases?per_page=1" \
+                | grep -o "\"browser_download_url\": \"[^\"]*zed-linux-$arch\.tar\.gz\"" \
+                | head -n 1 | cut -d '"' -f 4
+        )"
+        if [ -z "$asset_url" ]; then
+            echo "Could not find a zed-linux-$arch.tar.gz asset in the latest release" >&2
+            exit 1
+        fi
+        curl "$asset_url" > "$temp/zed-linux-$arch.tar.gz"
     fi
 
     suffix=""
