@@ -48,6 +48,9 @@ const POLL_INTERVAL: Duration = Duration::from_secs(60 * 60);
 const NIGHTLY_POLL_INTERVAL: Duration = Duration::from_secs(15 * 60);
 const REMOTE_SERVER_CACHE_LIMIT: usize = 5;
 
+/// The fork that publishes this build's releases.
+const RELEASES_REPO: &str = "Michael-Obele/zed";
+
 #[cfg(target_os = "linux")]
 fn linux_rsync_install_hint() -> &'static str {
     let os_release = match std::fs::read_to_string("/etc/os-release") {
@@ -188,6 +191,28 @@ pub struct AutoUpdater {
 pub struct ReleaseAsset {
     pub version: String,
     pub url: String,
+}
+
+/// Picks the `zed-linux-{arch}.tar.gz` asset out of a GitHub release.
+fn release_asset_for_arch(
+    release: &http_client::github::GithubRelease,
+    arch: &str,
+) -> Result<ReleaseAsset> {
+    let asset_name = format!("zed-linux-{arch}.tar.gz");
+    let asset = release
+        .assets
+        .iter()
+        .find(|asset| asset.name == asset_name)
+        .with_context(|| format!("release {} has no {asset_name} asset", release.tag_name))?;
+
+    Ok(ReleaseAsset {
+        version: release
+            .tag_name
+            .strip_prefix('v')
+            .unwrap_or(&release.tag_name)
+            .to_string(),
+        url: asset.browser_download_url.clone(),
+    })
 }
 
 struct MacOsUnmounter<'a> {
@@ -350,9 +375,7 @@ pub fn release_notes_url(cx: &mut App) -> Option<String> {
             let path = format!("/releases/{release_channel}/{current_version}");
             auto_updater.client.http_client().build_url(&path)
         }
-        ReleaseChannel::Nightly => {
-            "https://github.com/zed-industries/zed/commits/nightly/".to_string()
-        }
+        ReleaseChannel::Nightly => format!("https://github.com/{RELEASES_REPO}/releases"),
         ReleaseChannel::Dev => "https://github.com/zed-industries/zed/commits/main/".to_string(),
     };
     Some(url)
@@ -677,6 +700,21 @@ impl AutoUpdater {
         cx: &mut AsyncApp,
     ) -> Result<ReleaseAsset> {
         let client = this.read_with(cx, |this, _| this.client.clone());
+
+        // This fork ships app builds from its own GitHub Releases. Remote server
+        // binaries keep coming from cloud.zed.dev, so only the app asset is redirected.
+        if release_channel == ReleaseChannel::Nightly && asset == "zed" {
+            let release = http_client::github::latest_github_release(
+                RELEASES_REPO,
+                true,
+                true,
+                client.http_client(),
+            )
+            .await
+            .context("fetching releases from the fork")?;
+
+            return release_asset_for_arch(&release, arch);
+        }
 
         let (system_id, metrics_id, is_staff) = if client.telemetry().metrics_enabled() {
             (
@@ -1871,6 +1909,86 @@ mod tests {
         assert_eq!(
             newer_version.unwrap(),
             Some(fetched_version.parse().unwrap())
+        );
+    }
+
+    fn fake_github_release(tag: &str, asset_names: &[&str]) -> http_client::github::GithubRelease {
+        http_client::github::GithubRelease {
+            tag_name: tag.to_string(),
+            pre_release: true,
+            assets: asset_names
+                .iter()
+                .map(|name| http_client::github::GithubReleaseAsset {
+                    name: name.to_string(),
+                    browser_download_url: format!("https://example.test/{name}"),
+                    digest: None,
+                })
+                .collect(),
+            tarball_url: String::new(),
+            zipball_url: String::new(),
+        }
+    }
+
+    #[test]
+    fn test_release_asset_for_arch_picks_the_matching_tarball() {
+        let release = fake_github_release(
+            "v1.22.0+nightly.0f1e2d3c4b5a69788796a5b4c3d2e1f009182736",
+            &["zed-linux-aarch64.tar.gz", "zed-linux-x86_64.tar.gz"],
+        );
+
+        let asset = release_asset_for_arch(&release, "x86_64").unwrap();
+
+        assert_eq!(
+            asset.version,
+            "1.22.0+nightly.0f1e2d3c4b5a69788796a5b4c3d2e1f009182736"
+        );
+        assert_eq!(asset.url, "https://example.test/zed-linux-x86_64.tar.gz");
+    }
+
+    #[test]
+    fn test_release_asset_for_arch_errors_when_the_arch_is_missing() {
+        let release = fake_github_release("v1.22.0+nightly.abc", &["zed-linux-aarch64.tar.gz"]);
+
+        let error = release_asset_for_arch(&release, "x86_64").unwrap_err();
+
+        assert!(
+            error.to_string().contains("zed-linux-x86_64.tar.gz"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn test_release_asset_for_arch_keeps_tags_without_a_v_prefix() {
+        let release = fake_github_release("1.22.0", &["zed-linux-x86_64.tar.gz"]);
+
+        assert_eq!(
+            release_asset_for_arch(&release, "x86_64").unwrap().version,
+            "1.22.0"
+        );
+    }
+
+    /// The nightly update check compares the release tag's last build-metadata
+    /// segment against the commit baked into the binary. Both come from the same
+    /// `git rev-parse HEAD`, so a short sha in the tag would never match `full()`
+    /// and the updater would re-download the same build forever.
+    #[test]
+    fn test_fork_release_tag_matches_the_baked_commit_sha() {
+        let full_sha = "0f1e2d3c4b5a69788796a5b4c3d2e1f009182736";
+        let tag = format!("v1.22.0+nightly.{full_sha}");
+        let fetched_version = tag.strip_prefix('v').unwrap();
+
+        let newer_version = AutoUpdater::check_if_fetched_version_is_newer(
+            ReleaseChannel::Nightly,
+            Ok(Some(full_sha.to_string())),
+            semver::Version::new(1, 22, 0),
+            fetched_version.to_string(),
+            AutoUpdateStatus::Idle,
+        )
+        .expect("version check should succeed");
+
+        assert_eq!(
+            newer_version, None,
+            "the commit that published the release must not be offered as an update"
         );
     }
 }
