@@ -1559,6 +1559,16 @@ fn open_about_window(cx: &mut App) {
         message: SharedString,
         commit: Option<SharedString>,
         full_version: SharedString,
+        notice: SharedString,
+        modification_notice: SharedString,
+    }
+
+    const UNOFFICIAL_NOTICE: &str = "Unofficial test build — not affiliated with Zed Industries, Inc.\n\"Zed\" is a trademark of Zed Industries, Inc.";
+
+    /// The date this binary's modifications were built, for the GPL-3.0 §5 notice.
+    /// CI bakes `ZED_BUILD_DATE`; the literal keeps local builds truthful.
+    fn modification_date() -> &'static str {
+        option_env!("ZED_BUILD_DATE").unwrap_or("2026-10-02")
     }
 
     impl AboutWindow {
@@ -1573,7 +1583,13 @@ fn open_about_window(cx: &mut App) {
             } else {
                 ""
             };
-            let message: SharedString = format!("{release_channel_name} {version} {debug}").into();
+            let message: SharedString =
+                format!("{release_channel_name} {version} {debug} — unofficial test build").into();
+            let modification_notice: SharedString = format!(
+                "Modified from zed-industries/zed on {}. Source: github.com/Michael-Obele/zed",
+                modification_date()
+            )
+            .into();
             let commit = AppCommitSha::try_global(cx)
                 .map(|sha| sha.full())
                 .filter(|commit| !commit.is_empty())
@@ -1587,6 +1603,8 @@ fn open_about_window(cx: &mut App) {
                 message,
                 commit,
                 full_version,
+                notice: UNOFFICIAL_NOTICE.into(),
+                modification_notice,
             }
         }
 
@@ -1594,11 +1612,18 @@ fn open_about_window(cx: &mut App) {
             let content = match self.commit.as_ref() {
                 Some(commit) => {
                     format!(
-                        "{}\nCommit: {}\nVersion: {}",
-                        self.message, commit, self.full_version
+                        "{}\n{}\n{}\nCommit: {}\nVersion: {}",
+                        self.message,
+                        self.notice,
+                        self.modification_notice,
+                        commit,
+                        self.full_version
                     )
                 }
-                None => format!("{}\nVersion: {}", self.message, self.full_version),
+                None => format!(
+                    "{}\n{}\n{}\nVersion: {}",
+                    self.message, self.notice, self.modification_notice, self.full_version
+                ),
             };
             cx.write_to_clipboard(ClipboardItem::new_string(content));
             window.remove_window();
@@ -1646,7 +1671,17 @@ fn open_about_window(cx: &mut App) {
                                     .color(Color::Muted)
                                     .size(LabelSize::XSmall),
                             )
-                            .child(Label::new(self.full_version.clone()).size(LabelSize::Small)),
+                            .child(Label::new(self.full_version.clone()).size(LabelSize::Small))
+                            .child(
+                                Label::new(self.notice.clone())
+                                    .color(Color::Muted)
+                                    .size(LabelSize::XSmall),
+                            )
+                            .child(
+                                Label::new(self.modification_notice.clone())
+                                    .color(Color::Muted)
+                                    .size(LabelSize::XSmall),
+                            ),
                     )
                     .child(
                         h_flex()
