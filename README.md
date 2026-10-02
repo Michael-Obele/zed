@@ -1,5 +1,24 @@
-> [!IMPORTANT]
-> Remove this line to confirm you've reviewed this PR before submitting.
+> [!WARNING]
+> **This is an unofficial test build of Zed — not affiliated with, endorsed by, or connected
+> to Zed Industries, Inc.** "Zed" and the Zed logo are trademarks of Zed Industries, Inc.
+> It is a personal fork that adds `@mcp` context-server mentions to the Agent Panel
+> ([PR #62906](https://github.com/zed-industries/zed/pull/62906)); the modification is also
+> shown in the app's About window. Licensed GPL-3.0.
+
+[![mcp-nightly](https://github.com/Michael-Obele/zed/actions/workflows/mcp-nightly.yml/badge.svg)](https://github.com/Michael-Obele/zed/actions/workflows/mcp-nightly.yml)
+
+### Install (Linux, unofficial)
+
+```sh
+curl -f https://raw.githubusercontent.com/Michael-Obele/zed/main/script/install.sh | sh
+```
+
+Unpacks to `~/.local/zed-nightly.app` and installs `dev.zed.Zed-Nightly.desktop`, so it never
+collides with an official Zed install. In-app updates are enabled and need `rsync` on your
+machine. Downloads and builds come from
+[this repo's releases](https://github.com/Michael-Obele/zed/releases).
+
+---
 
 # Zed
 
