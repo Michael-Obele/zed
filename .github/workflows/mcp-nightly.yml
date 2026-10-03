@@ -20,6 +20,12 @@ on:
         default: ""
   push:
     branches: [main]
+    # A push only produces artifacts, and these paths cannot change the binary —
+    # rebuilding two Zed binaries for a docs or workflow edit is pure waste.
+    paths-ignore:
+      - "**/*.md"
+      - "docs/**"
+      - ".github/workflows/mcp-nightly.yml"
 
 permissions:
   contents: write
@@ -296,6 +302,32 @@ jobs:
                 echo "Deleting $tag"
                 gh release delete "$tag" --repo "$FORK_REPO" --yes --cleanup-tag
               done
+
+  clear-failure:
+    needs: [prepare, build, release, retention]
+    # A green scheduled run is the all-clear: close any stale failure issue, so one
+    # failure does not leave an open issue behind once it is fixed. `always()` is
+    # required — without it this job skips whenever an ancestor was skipped.
+    # Deliberately narrow: only a full release plus retention proves the pipeline.
+    if: always() && github.event_name != 'push' && needs.release.result == 'success' && needs.retention.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Close the open failure issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          numbers="$(gh issue list --repo "$FORK_REPO" --state open --label ci-failure \
+            --json number --jq '.[].number')"
+          if [ -z "$numbers" ]; then
+            echo "No open ci-failure issue."
+            exit 0
+          fi
+          for number in $numbers; do
+            gh issue close "$number" --repo "$FORK_REPO" --comment \
+              "Pipeline is green again — run ${{ github.run_id }} built both architectures and published a release. Closing automatically."
+          done
 
   notify-failure:
     needs: [sync, prepare, build, release]
