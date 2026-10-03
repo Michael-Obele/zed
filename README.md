@@ -1,6 +1,3 @@
-> [!IMPORTANT]
-> Remove this line to confirm you've reviewed this PR before submitting.
-
 > [!WARNING]
 > **This is an unofficial test build of Zed — not affiliated with, endorsed by, or connected
 > to Zed Industries, Inc.** "Zed" and the Zed logo are trademarks of Zed Industries, Inc.
