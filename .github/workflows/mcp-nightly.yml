@@ -248,7 +248,12 @@ jobs:
   release:
     needs: [prepare, build]
     # Schedule and manual runs publish; a push only produces artifacts.
-    if: github.event_name != 'push'
+    # `always()` is required here, not decoration: when `sync` is skipped (a push, or a
+    # dispatch that passed skip-sync) GitHub skips every job beneath it unless the job
+    # forces evaluation itself. That silently threw away a finished build: run
+    # 37903524845 built both architectures and then published nothing. The result checks
+    # keep a failed build from trying to publish tarballs that do not exist.
+    if: always() && github.event_name != 'push' && needs.prepare.result == 'success' && needs.build.result == 'success'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -307,7 +312,10 @@ jobs:
 
   retention:
     needs: [release]
-    if: needs.release.result == 'success'
+    # Same `always()` requirement as `release`: `sync` above is skipped on a push, and a
+    # skipped ancestor silently skips every descendant whose condition does not force
+    # evaluation itself.
+    if: always() && needs.release.result == 'success'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
