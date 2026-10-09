@@ -1,9 +1,14 @@
 name: mcp-nightly
 
 # This fork's build pipeline. `main` is the build branch: upstream's latest stable
-# release and origin/feat/mcp-mention are merged into it, a marker guard proves the
-# fork's patches survived the merge, and then both Linux architectures are built and
-# published as a prerelease that the app's own updater reads.
+# release is merged into it, a marker guard proves the fork's patches survived the
+# merge, and then both Linux architectures are built and published as a prerelease
+# that the app's own updater reads.
+#
+# origin/feat/mcp-mention is deliberately NOT merged. The fork's @mcp feature lives
+# on `main` as its own commits, while that branch sits on top of upstream's *dev*
+# branch: merging it would pull unreleased upstream code into a build that is meant
+# to track the stable tag, and it conflicts with `main` on every sync.
 on:
   schedule:
     # Daily, off the hour to avoid GitHub's cron congestion.
@@ -74,7 +79,7 @@ jobs:
           echo "Resolved sync target: $ref"
           echo "ref=$ref" >> "$GITHUB_OUTPUT"
 
-      - name: Merge upstream and the feature branch into main
+      - name: Merge the upstream release into main
         env:
           SYNC_REF: ${{ steps.target.outputs.ref }}
         run: |
@@ -83,9 +88,8 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git remote add upstream "https://github.com/$UPSTREAM_REPO.git"
           git fetch upstream --tags --force
-          git fetch origin feat/mcp-mention
-          # Merges only. A merge can add commits but never drop them, and an
-          # unexpected conflict aborts here — before anything is pushed and before
+          # Merge only. A merge can add commits but never drop them, and an
+          # unexpected conflict aborts here, before anything is pushed and before
           # any release exists.
           if ! git merge --no-edit "$SYNC_REF"; then
             # The one conflict we expect on every stable-tag sync: upstream's release
@@ -99,11 +103,11 @@ jobs:
               git add crates/zed/RELEASE_CHANNEL
               git commit --no-edit
             else
-              echo "Unexpected merge conflict(s): ${conflicts[*]}" >&2
+              echo "Unexpected merge conflict(s) in ${SYNC_REF}:" >&2
+              printf '  %s\n' "${conflicts[@]}" >&2
               exit 1
             fi
           fi
-          git merge --no-edit origin/feat/mcp-mention
           git push origin main
 
   prepare:
@@ -132,6 +136,9 @@ jobs:
           grep -q "Michael-Obele/zed" script/install.sh
           grep -qi "unofficial" crates/zed/src/zed.rs
           test "$(cat crates/zed/RELEASE_CHANNEL)" = "nightly"
+          # The fork's own app name, which keeps its config and data out of an
+          # official Zed install.
+          grep -q 'APP_NAME: &str = "Zed-Nightly"' crates/paths/src/paths.rs
           echo "All fork markers present."
 
       - name: Decide whether a release is due
