@@ -37,11 +37,8 @@ permissions:
   issues: write
 
 concurrency:
-  # A push run only produces artifacts that expire unused, so a newer push safely
-  # replaces an older one. Scheduled and manual runs are never cancelled, because one
-  # of them may be mid-release.
-  group: mcp-nightly-${{ github.event_name == 'push' && 'push' || 'release' }}
-  cancel-in-progress: ${{ github.event_name == 'push' }}
+  group: mcp-nightly
+  cancel-in-progress: false
 
 env:
   CARGO_TERM_COLOR: always
@@ -224,31 +221,14 @@ jobs:
       - name: Download the WASI SDK
         run: script/download-wasi-sdk
 
-      # Compiled output cannot travel through GitHub's cache: a from-scratch build here
-      # is 46 to 64 minutes per architecture, the target directory runs to tens of GB,
-      # and the repository cache is capped at 10 GB. sccache stores each compilation
-      # unit as its own object in remote storage instead, which is the same approach
-      # upstream Zed uses in its own release workflows.
-      # `script/setup-sccache` skips configuration when R2_ACCOUNT_ID is absent, so this
-      # step is inert until the repository has the three R2 secrets.
-      - name: Set up sccache
-        # Caching is an optimisation: a download or configuration failure here must not
-        # cost a release. Without it the build simply runs uncached, which is how every
-        # run before this change behaved anyway.
-        continue-on-error: true
-        env:
-          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
-          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-          # Never inherit upstream's bucket name: those credentials are not ours.
-          SCCACHE_BUCKET: ${{ vars.SCCACHE_BUCKET || 'zed-nightly-sccache' }}
-        run: script/setup-sccache
-
-      # Kept for the crates.io registry alone, so a cold runner does not re-download
-      # roughly 1.5 GB of crate sources. Its target-directory caching never worked here:
-      # it ignores CARGO_TARGET_DIR (Swatinem/rust-cache#173), so it snapshotted a
-      # workspace `target/` that never exists, and a real target directory would not fit
-      # the 10 GB budget regardless.
+      # Compiled output cannot be cached here on the free tier: a from-scratch build is
+      # 46 to 64 minutes per architecture, the target directory runs to tens of GB, and
+      # the repository cache is a hard 10 GB cap that GitHub support cannot raise. So
+      # this caches the crates.io registry alone, which still saves a cold runner from
+      # re-downloading roughly 1.5 GB of crate sources.
+      # Target-directory caching never worked here anyway: `rust-cache` ignores
+      # CARGO_TARGET_DIR (Swatinem/rust-cache#173), so it snapshotted a workspace
+      # `target/` that this job never creates.
       - name: Cache the crates.io registry
         uses: Swatinem/rust-cache@v2
         with:
@@ -257,12 +237,6 @@ jobs:
 
       - name: Build the Linux bundle
         run: script/bundle-linux
-
-      # The hit rate is the only honest measure of whether caching is working, and it is
-      # what any future tuning should be based on.
-      - name: Show the sccache statistics
-        if: always()
-        run: sccache --show-stats || true
 
       - name: Upload the tarball
         uses: actions/upload-artifact@v4
