@@ -6012,6 +6012,7 @@ mod tests {
                 "toolchain",
                 "variable_list",
                 "vim",
+                "which_key",
                 "window",
                 "workspace",
                 "worktree_picker",
