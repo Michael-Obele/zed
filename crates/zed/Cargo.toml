@@ -6,7 +6,7 @@ version = "1.22.0"
 publish.workspace = true
 license = "GPL-3.0-or-later"
 authors = ["Zed Team <hi@zed.dev>"]
-default-run = "zed"
+default-run = "zed-nightly"
 
 [lints]
 workspace = true
@@ -53,8 +53,12 @@ visual-tests = [
     "title_bar/test-support",
 ]
 
+# Named to match `paths::APP_NAME`. `crates/zed/src/main.rs` asserts the two agree,
+# which is what keeps this fork's config and data out of an official Zed install.
+# The packaged layout is unchanged: `script/bundle-linux` copies this binary to
+# `libexec/zed-editor`.
 [[bin]]
-name = "zed"
+name = "zed-nightly"
 path = "src/main.rs"
 
 [[bin]]
