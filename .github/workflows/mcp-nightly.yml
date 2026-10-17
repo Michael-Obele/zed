@@ -88,6 +88,13 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git remote add upstream "https://github.com/$UPSTREAM_REPO.git"
           git fetch upstream --tags --force
+          # Main may track upstream/main (ahead of the latest stable tag) after
+          # a manual sync. Merging the older stable tag back in would only
+          # produce conflicts, so skip when HEAD already contains the target.
+          if git merge-base --is-ancestor "$SYNC_REF" HEAD; then
+            echo "HEAD already contains $SYNC_REF; skipping merge."
+            exit 0
+          fi
           # Merge only. A merge can add commits but never drop them, and an
           # unexpected conflict aborts here, before anything is pushed and before
           # any release exists.
