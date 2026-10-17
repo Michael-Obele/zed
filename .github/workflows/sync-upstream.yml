@@ -1,0 +1,79 @@
+name: Sync upstream
+
+on:
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch: {}
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Checkout fork
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          # Use a PAT (UPSTREAM_SYNC_TOKEN) so pushes trigger downstream
+          # workflows. Falls back to GITHUB_TOKEN (push succeeds but
+          # downstream workflows are skipped by GitHub).
+          token: ${{ secrets.UPSTREAM_SYNC_TOKEN || secrets.GITHUB_TOKEN }}
+
+      - name: Git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Add upstream and fetch
+        run: |
+          git remote add upstream https://github.com/zed-industries/zed.git || git remote set-url upstream https://github.com/zed-industries/zed.git
+          git fetch origin main
+          git fetch upstream main --tags --prune -f
+
+      - name: Check divergence
+        id: diff
+        run: |
+          AHEAD=$(git rev-list --count HEAD..upstream/main)
+          DIVERGED="false"
+          if ! git merge-base --is-ancestor HEAD upstream/main && ! git merge-base --is-ancestor upstream/main HEAD; then
+            DIVERGED="true"
+          fi
+          echo "ahead=$AHEAD" >> "$GITHUB_OUTPUT"
+          echo "diverged=$DIVERGED" >> "$GITHUB_OUTPUT"
+          echo "Upstream is $AHEAD commits ahead, diverged=$DIVERGED"
+
+      - name: Fast-forward when possible
+        id: ff
+        if: steps.diff.outputs.ahead != '0' && steps.diff.outputs.diverged == 'false'
+        run: |
+          git checkout main
+          if git merge --ff-only upstream/main; then
+            git push origin main
+            git push origin --tags
+            echo "pushed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "pushed=false" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
+      - name: Open sync PR on divergence
+        if: steps.diff.outputs.diverged == 'true' && steps.diff.outputs.ahead != '0'
+        env:
+          GH_TOKEN: ${{ secrets.UPSTREAM_SYNC_TOKEN || secrets.GITHUB_TOKEN }}
+        run: |
+          BRANCH="sync/upstream-$(date -u +%Y%m%d)"
+          git checkout -B "$BRANCH" upstream/main
+          # Replay fork-only CI commits if they still apply; otherwise leave for manual fix.
+          # Fork is ahead, so keep upstream as base and note it in the PR.
+          git push -u origin "$BRANCH" --force
+          if ! gh pr list --head "$BRANCH" --json number --jq '.[0].number' | grep -q '[0-9]'; then
+            gh pr create --base main --head "$BRANCH" \
+              --title "sync: upstream/main ($(date -u +%Y-%m-%d))" \
+              --body "Automated upstream sync. Fork has diverged (custom CI commits), so fast-forward was refused. Review and merge manually."
+          fi

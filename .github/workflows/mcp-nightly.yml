@@ -1,0 +1,386 @@
+name: mcp-nightly
+
+# This fork's build pipeline. `main` is the build branch: upstream's latest stable
+# release is merged into it, a marker guard proves the fork's patches survived the
+# merge, and then both Linux architectures are built and published as a prerelease
+# that the app's own updater reads.
+#
+# origin/feat/mcp-mention is deliberately NOT merged. The fork's @mcp feature lives
+# on `main` as its own commits, while that branch sits on top of upstream's *dev*
+# branch: merging it would pull unreleased upstream code into a build that is meant
+# to track the stable tag, and it conflicts with `main` on every sync.
+on:
+  schedule:
+    # Daily, off the hour to avoid GitHub's cron congestion.
+    - cron: "10 7 * * *"
+  workflow_dispatch:
+    inputs:
+      skip-sync:
+        description: "Rebuild the current main without merging upstream or the feature branch"
+        type: boolean
+        default: false
+      sync-ref:
+        description: "Override the upstream sync target (tag or branch). Empty = latest stable release"
+        type: string
+        default: ""
+  push:
+    branches: [main]
+    # A push only produces artifacts, and these paths cannot change the binary —
+    # rebuilding two Zed binaries for a docs or workflow edit is pure waste.
+    paths-ignore:
+      - "**/*.md"
+      - "docs/**"
+      - ".github/workflows/mcp-nightly.yml"
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: mcp-nightly
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+  FORK_REPO: Michael-Obele/zed
+  UPSTREAM_REPO: zed-industries/zed
+  # The runner's root filesystem guarantees only ~14 GB, so Cargo's output goes on
+  # the large scratch disk instead. `script/bundle-linux:49` honours this variable.
+  CARGO_TARGET_DIR: /mnt/zed-target
+
+jobs:
+  sync:
+    # Never on push: CI's own push to main must not re-trigger the pipeline.
+    if: github.event_name != 'push' && inputs.skip-sync != true
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out the build branch
+        uses: actions/checkout@v5
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve the sync target
+        id: target
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SYNC_REF: ${{ inputs.sync-ref }}
+        run: |
+          set -euo pipefail
+          if [ -n "$SYNC_REF" ]; then
+            ref="$SYNC_REF"
+          else
+            # /releases/latest excludes prereleases and drafts by definition.
+            ref="$(gh api "repos/$UPSTREAM_REPO/releases/latest" --jq .tag_name)"
+          fi
+          echo "Resolved sync target: $ref"
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+
+      - name: Merge the upstream release into main
+        env:
+          SYNC_REF: ${{ steps.target.outputs.ref }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream "https://github.com/$UPSTREAM_REPO.git"
+          git fetch upstream --tags --force
+          # Merge only. A merge can add commits but never drop them, and an
+          # unexpected conflict aborts here, before anything is pushed and before
+          # any release exists.
+          if ! git merge --no-edit "$SYNC_REF"; then
+            # The one conflict we expect on every stable-tag sync: upstream's release
+            # tags set RELEASE_CHANNEL to `stable`, and this fork pins it to `nightly`.
+            # Re-assert ours and carry on, but only when that file is the *only*
+            # conflict — anything else stays a loud failure.
+            readarray -t conflicts < <(git diff --name-only --diff-filter=U)
+            if [ "${#conflicts[@]}" -eq 1 ] && [ "${conflicts[0]}" = "crates/zed/RELEASE_CHANNEL" ]; then
+              echo "Resolving the expected RELEASE_CHANNEL conflict in favour of the fork."
+              printf 'nightly\n' > crates/zed/RELEASE_CHANNEL
+              git add crates/zed/RELEASE_CHANNEL
+              git commit --no-edit
+            else
+              echo "Unexpected merge conflict(s) in ${SYNC_REF}:" >&2
+              printf '  %s\n' "${conflicts[@]}" >&2
+              exit 1
+            fi
+          fi
+          git push origin main
+
+  prepare:
+    needs: [sync]
+    # `always()` so a skipped sync still builds; a failed sync stops the run here.
+    if: always() && needs.sync.result != 'failure'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      should_build: ${{ steps.decide.outputs.should_build }}
+      matrix: ${{ steps.decide.outputs.matrix }}
+      tag: ${{ steps.decide.outputs.tag }}
+      sha: ${{ steps.decide.outputs.sha }}
+      date: ${{ steps.decide.outputs.date }}
+    steps:
+      - name: Check out the build branch
+        uses: actions/checkout@v5
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Guard the fork's patches
+        run: |
+          set -euo pipefail
+          grep -q "MentionUri::ContextServer" crates/acp_thread/src/mention.rs
+          grep -q "Michael-Obele/zed" crates/auto_update/src/auto_update.rs
+          grep -q "Michael-Obele/zed" script/install.sh
+          grep -qi "unofficial" crates/zed/src/zed.rs
+          test "$(cat crates/zed/RELEASE_CHANNEL)" = "nightly"
+          # The fork's own app name, which keeps its config and data out of an
+          # official Zed install.
+          grep -q 'APP_NAME: &str = "Zed-Nightly"' crates/paths/src/paths.rs
+          echo "All fork markers present."
+
+      - name: Decide whether a release is due
+        id: decide
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          sha="$(git rev-parse HEAD)"
+          version="$(script/get-crate-version zed)"
+          tag="v${version}+nightly.${sha}"
+          date="$(date -u +%F)"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "date=$date" >> "$GITHUB_OUTPUT"
+          # A push run publishes nothing (the release job is gated to non-push), so
+          # building the second architecture would be pure waste. Only a run that can
+          # create a release builds both.
+          if [ "${{ github.event_name }}" = "push" ]; then
+            echo 'matrix={"include":[{"runner":"ubuntu-24.04","arch":"x86_64"}]}' >> "$GITHUB_OUTPUT"
+          else
+            echo 'matrix={"include":[{"runner":"ubuntu-24.04","arch":"x86_64"},{"runner":"ubuntu-24.04-arm","arch":"aarch64"}]}' >> "$GITHUB_OUTPUT"
+          fi
+          # The nightly update check compares the tag's last build-metadata segment with
+          # the commit baked into the binary, so the tag carries the full sha, not a short
+          # one — a short sha would never match and every launch would re-download.
+          # A previously *failed* build has no release, so it retries on the next run.
+          if gh release view "$tag" --repo "$FORK_REPO" >/dev/null 2>&1; then
+            echo "Release $tag already exists; skipping the build."
+            echo "should_build=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "No release for $tag yet; building."
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    needs: [prepare]
+    # `always()` is required, not decoration: when `sync` is skipped (a push run) GitHub
+    # skips every job beneath it unless the job forces evaluation itself. Without it
+    # `build` silently skipped even though `prepare` reported should_build=true.
+    if: always() && needs.prepare.outputs.should_build == 'true'
+    strategy:
+      fail-fast: false
+      # Both architectures when the run can publish, one on a push. Decided by
+      # `prepare` so the choice lives in a single place.
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 300
+    env:
+      CC: clang
+      CXX: clang++
+      ZED_COMMIT_SHA: ${{ needs.prepare.outputs.sha }}
+      ZED_BUILD_DATE: ${{ needs.prepare.outputs.date }}
+    steps:
+      - name: Check out the build branch
+        uses: actions/checkout@v5
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Report free space before building
+        run: df -h / /mnt
+
+      - name: Put Cargo's output on the scratch disk
+        run: |
+          sudo mkdir -p "$CARGO_TARGET_DIR"
+          sudo chown -R "$USER" "$CARGO_TARGET_DIR"
+
+      - name: Free space on the root filesystem
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /usr/local/share/boost /opt/hostedtoolcache/CodeQL
+          sudo docker image prune -af || true
+          df -h /
+
+      - name: Install Linux build dependencies
+        run: script/linux
+
+      - name: Download the WASI SDK
+        run: script/download-wasi-sdk
+
+      # Compiled output cannot be cached here on the free tier: a from-scratch build is
+      # 46 to 64 minutes per architecture, the target directory runs to tens of GB, and
+      # the repository cache is a hard 10 GB cap that GitHub support cannot raise. So
+      # this caches the crates.io registry alone, which still saves a cold runner from
+      # re-downloading roughly 1.5 GB of crate sources.
+      # Target-directory caching never worked here anyway: `rust-cache` ignores
+      # CARGO_TARGET_DIR (Swatinem/rust-cache#173), so it snapshotted a workspace
+      # `target/` that this job never creates.
+      - name: Cache the crates.io registry
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.arch }}
+          cache-targets: false
+
+      - name: Build the Linux bundle
+        run: script/bundle-linux
+
+      - name: Upload the tarball
+        uses: actions/upload-artifact@v4
+        with:
+          name: zed-linux-${{ matrix.arch }}
+          path: ${{ env.CARGO_TARGET_DIR }}/release/zed-linux-${{ matrix.arch }}.tar.gz
+          retention-days: 7
+
+  release:
+    needs: [prepare, build]
+    # Schedule and manual runs publish; a push only produces artifacts.
+    # `always()` is required here, not decoration: when `sync` is skipped (a push, or a
+    # dispatch that passed skip-sync) GitHub skips every job beneath it unless the job
+    # forces evaluation itself. That silently threw away a finished build: run
+    # 37903524845 built both architectures and then published nothing. The result checks
+    # keep a failed build from trying to publish tarballs that do not exist.
+    if: always() && github.event_name != 'push' && needs.prepare.result == 'success' && needs.build.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Collect the tarballs
+        uses: actions/download-artifact@v4
+        with:
+          pattern: zed-linux-*
+          path: dist
+          merge-multiple: true
+
+      - name: Write checksums
+        run: |
+          set -euo pipefail
+          cd dist
+          sha256sum zed-linux-*.tar.gz > sha256sums.txt
+          cat sha256sums.txt
+
+      - name: Create the prerelease
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+          SHA: ${{ needs.prepare.outputs.sha }}
+          BUILD_DATE: ${{ needs.prepare.outputs.date }}
+        run: |
+          set -euo pipefail
+          short_sha="${SHA:0:9}"
+          cat > notes.md <<EOF
+          ## Unofficial test build — MCP context-server mentions
+
+          **This is an automated test build of a personal fork. It is not an official Zed release.**
+
+          - **Not affiliated with, endorsed by, or connected to Zed Industries, Inc.**
+            "Zed" and the Zed logo are trademarks of Zed Industries, Inc.
+          - Built ${BUILD_DATE} from [\`${short_sha}\`](https://github.com/$FORK_REPO/commit/${SHA})
+          - Based on the latest upstream stable release, merged into \`main\`
+          - This public repo is the Corresponding Source. License: GPL-3.0 (see \`licenses.md\` in the tarball)
+          - Modified from zed-industries/zed; the modification is also shown in the app's About window.
+
+          **Install:**
+
+          \`\`\`sh
+          curl -f https://raw.githubusercontent.com/$FORK_REPO/main/script/install.sh | sh
+          \`\`\`
+
+          **In-app updates:** enabled (needs \`rsync\` on your machine).
+
+          **What's in this build:** \`@mcp\` mention autocomplete in the Agent Panel — attach a running MCP context server to a conversation explicitly.
+          EOF
+          gh release create "$TAG" \
+            --repo "$FORK_REPO" \
+            --prerelease \
+            --target "$SHA" \
+            --title "Unofficial MCP test build ${TAG}" \
+            --notes-file notes.md \
+            dist/zed-linux-*.tar.gz dist/sha256sums.txt
+
+  retention:
+    needs: [release]
+    # Same `always()` requirement as `release`: `sync` above is skipped on a push, and a
+    # skipped ancestor silently skips every descendant whose condition does not force
+    # evaluation itself.
+    if: always() && needs.release.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Keep only the newest ten releases
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh release list --repo "$FORK_REPO" --limit 100 \
+            --json tagName,isPrerelease,createdAt \
+            --jq '[.[] | select(.isPrerelease)] | .[10:] | .[].tagName' \
+            | while read -r tag; do
+                [ -n "$tag" ] || continue
+                echo "Deleting $tag"
+                gh release delete "$tag" --repo "$FORK_REPO" --yes --cleanup-tag
+              done
+
+  clear-failure:
+    needs: [prepare, build, release, retention]
+    # A green scheduled run is the all-clear: close any stale failure issue, so one
+    # failure does not leave an open issue behind once it is fixed. `always()` is
+    # required — without it this job skips whenever an ancestor was skipped.
+    # Deliberately narrow: only a full release plus retention proves the pipeline.
+    if: always() && github.event_name != 'push' && needs.release.result == 'success' && needs.retention.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Close the open failure issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          numbers="$(gh issue list --repo "$FORK_REPO" --state open --label ci-failure \
+            --json number --jq '.[].number')"
+          if [ -z "$numbers" ]; then
+            echo "No open ci-failure issue."
+            exit 0
+          fi
+          for number in $numbers; do
+            gh issue close "$number" --repo "$FORK_REPO" --comment \
+              "Pipeline is green again — run ${{ github.run_id }} built both architectures and published a release. Closing automatically."
+          done
+
+  notify-failure:
+    needs: [sync, prepare, build, release]
+    if: failure()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Comment on or open the failure issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          TRIGGER: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          existing="$(gh issue list --repo "$FORK_REPO" --state open \
+            --search 'mcp-nightly failed in:title' --json number --jq '.[0].number')"
+          body="$(printf 'The mcp-nightly pipeline failed on %s.\n\nRun: %s\nTrigger: %s' \
+            "$(date -u +%F)" "$RUN_URL" "$TRIGGER")"
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --repo "$FORK_REPO" --body "$body"
+          else
+            gh issue create --repo "$FORK_REPO" \
+              --title "mcp-nightly failed: run ${{ github.run_id }}" \
+              --body "$body" \
+              --label ci-failure
+          fi
