@@ -1,9 +1,14 @@
 name: mcp-nightly
 
-# This fork's build pipeline. `main` is the build branch: upstream's latest stable
-# release is merged into it, a marker guard proves the fork's patches survived the
-# merge, and then both Linux architectures are built and published as a prerelease
-# that the app's own updater reads.
+# This fork's build pipeline. `main` is the build branch: it tracks upstream `main`
+# (via the `Sync upstream` workflow), a marker guard proves the fork's patches
+# survived the merge, and then both Linux architectures are built and published
+# as a prerelease that the app's own updater reads.
+#
+# The `sync` job below can still merge an upstream stable tag when `main` is
+# behind one (e.g. a fresh fork), but in steady state it skips: stable tags are
+# cut from a release branch and are not ancestors of an upstream-`main`-based
+# `main`, so merging them would go backwards.
 #
 # origin/feat/mcp-mention is deliberately NOT merged. The fork's @mcp feature lives
 # on `main` as its own commits, while that branch sits on top of upstream's *dev*
@@ -61,7 +66,9 @@ jobs:
         with:
           ref: main
           fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
+          # A PAT so this job's push triggers downstream workflows.
+          # Falls back to GITHUB_TOKEN (push succeeds, downstream skipped).
+          token: ${{ secrets.UPSTREAM_SYNC_TOKEN || secrets.GITHUB_TOKEN }}
 
       - name: Resolve the sync target
         id: target
@@ -152,6 +159,14 @@ jobs:
           # The fork's own app name, which keeps its config and data out of an
           # official Zed install.
           grep -q 'APP_NAME: &str = "Zed-Nightly"' crates/paths/src/paths.rs
+          # The binary must match APP_NAME: upstream asserts this at compile time
+          # (crates/zed/src/main.rs), and a sync that takes upstream's
+          # crates/zed/Cargo.toml wholesale silently drops the rename and breaks
+          # both architectures after an hour of compiling (Oct 2026).
+          grep -q 'name = "zed-nightly"' crates/zed/Cargo.toml
+          grep -q 'default-run = "zed-nightly"' crates/zed/Cargo.toml
+          grep -q '\-\-bin zed-nightly' script/bundle-linux
+          grep -q 'release/zed-nightly' script/bundle-linux
           echo "All fork markers present."
 
       - name: Decide whether a release is due
@@ -300,7 +315,7 @@ jobs:
           - **Not affiliated with, endorsed by, or connected to Zed Industries, Inc.**
             "Zed" and the Zed logo are trademarks of Zed Industries, Inc.
           - Built ${BUILD_DATE} from [\`${short_sha}\`](https://github.com/$FORK_REPO/commit/${SHA})
-          - Based on the latest upstream stable release, merged into \`main\`
+          - Based on upstream \`main\`, synced into \`main\` (see \`Sync upstream\` runs)
           - This public repo is the Corresponding Source. License: GPL-3.0 (see \`licenses.md\` in the tarball)
           - Modified from zed-industries/zed; the modification is also shown in the app's About window.
 
