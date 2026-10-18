@@ -89,10 +89,15 @@ jobs:
           git remote add upstream "https://github.com/$UPSTREAM_REPO.git"
           git fetch upstream --tags --force
           # Main may track upstream/main (ahead of the latest stable tag) after
-          # a manual sync. Merging the older stable tag back in would only
-          # produce conflicts, so skip when HEAD already contains the target.
+          # a manual sync. Stable tags are cut from a release branch, so the
+          # tag is typically *not* an ancestor of such a main — merging it
+          # would go backwards and only produce conflicts.
           if git merge-base --is-ancestor "$SYNC_REF" HEAD; then
             echo "HEAD already contains $SYNC_REF; skipping merge."
+            exit 0
+          fi
+          if ! git merge-base --is-ancestor HEAD "$SYNC_REF"; then
+            echo "HEAD and $SYNC_REF have diverged (main is ahead of stable); skipping stable merge."
             exit 0
           fi
           # Merge only. A merge can add commits but never drop them, and an
