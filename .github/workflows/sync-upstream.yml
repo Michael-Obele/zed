@@ -15,6 +15,12 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
+      # NOTE: there is no `workflows:` job permission scope. The ability to
+      # push upstream workflow files (.github/workflows/*) to the sync branch
+      # comes from the *token*, not job permissions: UPSTREAM_SYNC_TOKEN must
+      # have workflow scope (fine-grained PAT: Workflows Read and write, or
+      # classic PAT `workflow` scope). Without it the push is rejected with:
+      # "refusing to allow ... without `workflow` scope".
     steps:
       - name: Checkout fork
         uses: actions/checkout@v4
@@ -71,7 +77,10 @@ jobs:
           git checkout -B "$BRANCH" upstream/main
           # Replay fork-only CI commits if they still apply; otherwise leave for manual fix.
           # Fork is ahead, so keep upstream as base and note it in the PR.
-          git push -u origin "$BRANCH" --force
+          if ! git push -u origin "$BRANCH" --force; then
+            echo "::error::Sync push rejected. If the message mentions workflow scope, recreate UPSTREAM_SYNC_TOKEN with workflow scope (fine-grained PAT: Workflows Read and write, or classic 'workflow' scope) in Settings → Secrets → Actions."
+            exit 1
+          fi
           if ! gh pr list --head "$BRANCH" --json number --jq '.[0].number' | grep -q '[0-9]'; then
             gh pr create --base main --head "$BRANCH" \
               --title "sync: upstream/main ($(date -u +%Y-%m-%d))" \

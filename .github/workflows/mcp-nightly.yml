@@ -95,16 +95,14 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git remote add upstream "https://github.com/$UPSTREAM_REPO.git"
           git fetch upstream --tags --force
-          # Main may track upstream/main (ahead of the latest stable tag) after
-          # a manual sync. Stable tags are cut from a release branch, so the
-          # tag is typically *not* an ancestor of such a main — merging it
-          # would go backwards and only produce conflicts.
+          # Main carries fork commits, so it is never an ancestor of an upstream
+          # stable tag (those are cut from a separate release branch). Requiring
+          # `HEAD` to be an ancestor of the tag silently skipped every release
+          # and left `prepare` looking at a tag that already existed, so the fork
+          # stopped building altogether. A merge preserves both sides; the one
+          # expected conflict is handled below and anything else fails loudly.
           if git merge-base --is-ancestor "$SYNC_REF" HEAD; then
             echo "HEAD already contains $SYNC_REF; skipping merge."
-            exit 0
-          fi
-          if ! git merge-base --is-ancestor HEAD "$SYNC_REF"; then
-            echo "HEAD and $SYNC_REF have diverged (main is ahead of stable); skipping stable merge."
             exit 0
           fi
           # Merge only. A merge can add commits but never drop them, and an
@@ -127,7 +125,10 @@ jobs:
               exit 1
             fi
           fi
-          git push origin main
+          if ! git push origin main; then
+            echo "::error::Push rejected. If the message mentions 'workflow' scope, UPSTREAM_SYNC_TOKEN lacks Workflows write (fine-grained PAT: Workflows Read and write, or classic 'workflow' scope)."
+            exit 1
+          fi
 
   prepare:
     needs: [sync]

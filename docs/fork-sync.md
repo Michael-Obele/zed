@@ -73,8 +73,13 @@ GitHub computes mergeability async — re-query after ~10s if still DIRTY.
   (release-plz docs). The sync job checks out with
   `UPSTREAM_SYNC_TOKEN || GITHUB_TOKEN` so a PAT, when present, lets a
   scheduled sync-merge trigger the follow-on build. Secret
-  `UPSTREAM_SYNC_TOKEN` (fine-grained PAT: contents + PRs write on this repo)
-  is still missing as of Oct 2026 — add it in Settings → Secrets → Actions.
+  `UPSTREAM_SYNC_TOKEN` needs Contents + Pull requests + Workflows write on
+  this repo (fine-grained PAT: Workflows Read and write, or classic `workflow`
+  scope) — without Workflows write the sync-branch push is rejected with
+  `refusing to allow ... without 'workflow' scope` whenever upstream touched
+  `.github/workflows/*` (seen 2026-10-31; note there is no `workflows:` job
+  permission scope — the scope must come from the PAT itself).
+  Add/rotate it in Settings → Secrets → Actions.
 - `release_nightly.yml`/`release.yml` are upstream-generated (`cargo xtask workflows`)
   with a `repository_owner == zed-industries` guard — they always skip on the fork.
   Don't "fix" by editing them; use `mcp-nightly.yml` / a fork workflow instead.
