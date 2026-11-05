@@ -1,14 +1,15 @@
 name: mcp-nightly
 
-# This fork's build pipeline. `main` is the build branch: it tracks upstream `main`
-# (via the `Sync upstream` workflow), a marker guard proves the fork's patches
-# survived the merge, and then both Linux architectures are built and published
-# as a prerelease that the app's own updater reads.
+# This fork's build pipeline. `main` is the build branch: it tracks the latest
+# upstream stable release, a marker guard proves the fork's patches survived the
+# merge, and then both Linux architectures are built and published as a
+# prerelease that the app's own updater reads. `Sync upstream` opens a manual
+# fallback PR when the automatic merge below hits an unexpected conflict.
 #
-# The `sync` job below can still merge an upstream stable tag when `main` is
-# behind one (e.g. a fresh fork), but in steady state it skips: stable tags are
-# cut from a release branch and are not ancestors of an upstream-`main`-based
-# `main`, so merging them would go backwards.
+# The `sync` job below merges the tag returned by `/releases/latest` into
+# `main`. Stable tags are cut from a separate release branch, so a `main` that
+# carries fork commits is never an ancestor of the tag; the merge is attempted
+# regardless, and only the expected `RELEASE_CHANNEL` conflict is auto-resolved.
 #
 # origin/feat/mcp-mention is deliberately NOT merged. The fork's @mcp feature lives
 # on `main` as its own commits, while that branch sits on top of upstream's *dev*
@@ -316,7 +317,7 @@ jobs:
           - **Not affiliated with, endorsed by, or connected to Zed Industries, Inc.**
             "Zed" and the Zed logo are trademarks of Zed Industries, Inc.
           - Built ${BUILD_DATE} from [\`${short_sha}\`](https://github.com/$FORK_REPO/commit/${SHA})
-          - Based on upstream \`main\`, synced into \`main\` (see \`Sync upstream\` runs)
+          - Based on the latest upstream stable release, synced into \`main\` by the \`mcp-nightly\` sync job
           - This public repo is the Corresponding Source. License: GPL-3.0 (see \`licenses.md\` in the tarball)
           - Modified from zed-industries/zed; the modification is also shown in the app's About window.
 

@@ -1,16 +1,21 @@
 # Upstream Sync (fork → zed-industries/zed)
 
-Use for recurring `main` syncs. PR pattern: `sync/upstream-YYYYMMDD` → `main`.
+Use when the automatic stable merge in `mcp-nightly.yml` fails and a human
+needs to resolve conflicts. PR pattern: `sync/stable-YYYYMMDD` → `main`.
 
 ## 1. Start
 
+`main` tracks the latest upstream **stable release**, not `upstream/main`.
+Resolve the tag with `/releases/latest` (it excludes prereleases and drafts):
+
 ```sh
 git checkout main && git pull --rebase origin main
-git fetch upstream main --tags
-git rev-list --left-right --count HEAD...upstream/main  # ahead/behind
-git checkout -B sync/upstream-$(date -u +%Y%m%d) upstream/main
-git push -u origin sync/upstream-$(date -u +%Y%m%d) --force
-gh pr create --base main --head sync/upstream-$(date -u +%Y%m%d) --title "sync: upstream/main (DATE)" --body "..."
+git fetch upstream --tags --force
+STABLE=$(gh api repos/zed-industries/zed/releases/latest --jq .tag_name)  # e.g. v1.27.0
+git rev-list --left-right --count HEAD..."$STABLE"  # ahead/behind
+git checkout -B sync/stable-$(date -u +%Y%m%d) "$STABLE"
+git push -u origin sync/stable-$(date -u +%Y%m%d) --force
+gh pr create --base main --head sync/stable-$(date -u +%Y%m%d) --title "sync: stable $STABLE (DATE)" --body "..."
 ```
 
 ## 2. Resolve (merge `origin/main` INTO sync branch, never the reverse)
@@ -23,7 +28,7 @@ git diff --name-only --diff-filter=U   # conflicted files
 
 ## 3. Conflict policy
 
-- **Default: take upstream (`--ours`, since sync branch is upstream-based).**
+- **Default: take upstream (`--ours`, since the sync branch is tag-based).**
   Applies to: `Cargo.lock`, `crates/edit_prediction/**`, `crates/gpui/**`,
   `crates/sidebar/**`, other upstream-refactored code.
 - **Fork-critical renames — NEVER take upstream wholesale (Oct 2026 outage):**
@@ -65,10 +70,12 @@ GitHub computes mergeability async — re-query after ~10s if still DIRTY.
 
 ## Notes
 
-- Tracking policy: `main` follows upstream `main` (via `Sync upstream`), NOT
-  stable tags. The stable-tag merge step in `mcp-nightly.yml` is a fallback for
-  fresh/behind forks only; it skips when diverged. Don't reintroduce stable
-  tracking without updating the release notes line and this doc.
+- Tracking policy: `main` follows the latest upstream **stable release**
+  (`/releases/latest`), not `upstream/main`. `mcp-nightly.yml` merges that tag,
+  resolves the expected `RELEASE_CHANNEL` conflict, then builds and releases.
+  `sync-upstream.yml` opens a `sync/stable-*` PR as the manual fallback when the
+  automatic merge hits an unexpected conflict. Don't point either workflow at
+  `upstream/main`; that pulls nightly code into a stable-based `main`.
 - Pushes made with `GITHUB_TOKEN` do not trigger downstream workflows
   (release-plz docs). The sync job checks out with
   `UPSTREAM_SYNC_TOKEN || GITHUB_TOKEN` so a PAT, when present, lets a
