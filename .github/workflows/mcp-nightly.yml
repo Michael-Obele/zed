@@ -264,6 +264,58 @@ jobs:
           key: ${{ matrix.arch }}
           cache-targets: false
 
+      # webrtc-sys downloads a prebuilt archive from its build script. A single
+      # 504 from the asset CDN kills the aarch64 build ~45 minutes in, so fetch it
+      # up front with retries and point the build at the extracted tree instead.
+      - name: Pre-download the WebRTC prebuilt
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          case "$ARCH" in
+            x86_64) TRIPLE="linux-x64-release" ;;
+            aarch64) TRIPLE="linux-arm64-release" ;;
+            *) echo "::error::Unsupported architecture: $ARCH"; exit 1 ;;
+          esac
+          # Resolve the archive tag from the webrtc-sys revision pinned in Cargo.lock
+          # so a dependency bump cannot silently use the wrong WebRTC build.
+          REV=$(sed -n '/^name = "webrtc-sys"$/,/^\[\[package\]\]$/p' Cargo.lock \
+            | sed -n 's/.*rev=\([0-9a-f]\{40\}\).*/\1/p')
+          # This is an optimisation, not a build input: if the dependency layout
+          # changes, fall back to letting the build script download WebRTC itself.
+          if [ -z "$REV" ]; then
+            echo "::warning::Could not find the webrtc-sys revision in Cargo.lock; leaving the download to the build script."
+            exit 0
+          fi
+          if ! TAG=$(curl --fail --silent --show-error --location \
+            --retry 5 --retry-all-errors \
+            "https://raw.githubusercontent.com/zed-industries/livekit-rust-sdks/$REV/webrtc-sys/build/src/lib.rs" \
+            | sed -n 's/.*WEBRTC_TAG: &str = "\([^"]*\)".*/\1/p'); then
+            echo "::warning::Could not fetch the webrtc-sys build script; leaving the download to the build script."
+            exit 0
+          fi
+          if [ -z "$TAG" ]; then
+            echo "::warning::Could not resolve WEBRTC_TAG; leaving the download to the build script."
+            exit 0
+          fi
+          URL="https://github.com/zed-industries/livekit-rust-sdks/releases/download/$TAG/webrtc-$TRIPLE.zip"
+          CACHE="/mnt/webrtc-prebuilt"
+          DEST="$CACHE/$TRIPLE"
+          # /mnt is root-owned on the hosted runners; the Cargo target dir above
+          # uses the same sudo/chown dance for this reason.
+          sudo rm -rf "$CACHE"
+          sudo mkdir -p "$CACHE"
+          sudo chown -R "$USER" "$CACHE"
+          echo "Downloading $URL"
+          curl --fail --location --retry 8 --retry-delay 10 --retry-all-errors \
+            --retry-max-time 300 --output "$CACHE/webrtc.zip" "$URL"
+          unzip -q "$CACHE/webrtc.zip" -d "$CACHE"
+          rm -f "$CACHE/webrtc.zip"
+          test -f "$DEST/webrtc.ninja"
+          test -f "$DEST/desktop_capture.ninja"
+          echo "LK_CUSTOM_WEBRTC=$DEST" >> "$GITHUB_ENV"
+          du -sh "$DEST"
+
       - name: Build the Linux bundle
         run: script/bundle-linux
 
