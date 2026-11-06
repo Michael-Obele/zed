@@ -354,7 +354,10 @@ jobs:
 
       - name: Create the prerelease
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # `--target` spanning a commit that changed .github/workflows/* needs
+          # the `workflow` scope, which GITHUB_TOKEN cannot be granted (there is
+          # no `workflows:` permission key). Use the PAT, which has it.
+          GH_TOKEN: ${{ secrets.UPSTREAM_SYNC_TOKEN || secrets.GITHUB_TOKEN }}
           TAG: ${{ needs.prepare.outputs.tag }}
           SHA: ${{ needs.prepare.outputs.sha }}
           BUILD_DATE: ${{ needs.prepare.outputs.date }}
@@ -402,7 +405,9 @@ jobs:
     steps:
       - name: Keep only the newest ten releases
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Deleting an old release can hit the same workflow-scope requirement
+          # as creating one, because its tag contains workflow changes.
+          GH_TOKEN: ${{ secrets.UPSTREAM_SYNC_TOKEN || secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           gh release list --repo "$FORK_REPO" --limit 100 \
